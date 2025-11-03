@@ -1,0 +1,55 @@
+stages:
+  - build
+  - deploy
+
+build-job:
+  image: docker:24.0.5-dind
+  stage: build
+
+  before_script:
+      - docker login -u "$Nexus_REPO_USER" -p "$Nexus_REPO_PASS" $Nexus_ADDR
+  variables:
+#      DOCKER_TLS_CERTDIR: "/certs"
+      DOCKER_TLS_CERTDIR: ""    
+  services:
+    - docker:24.0.5-dind
+  script:
+      - docker build --pull -t "$Nexus_ADDR/$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" .
+      - docker push "$Nexus_ADDR/$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+  tags:
+      - master
+
+install_helm_chart:
+  image: sergespb/kube-tools:0.2.0
+  stage: deploy
+  variables:
+    NAMESPACE: ""
+    VALUES_STRING: ""
+    HELM_CHART: "application"
+    APP_NAME: "myproject"
+    SECURE_FILES_DOWNLOAD_PATH: '.'
+
+  script:
+     - git clone http://gitlab-ci-token:${CI_JOB_TOKEN}@192.168.50.26/mygroup/helm
+     - echo "Helm repo checkout has been completed"
+     - export VALUES_FILE="helm/application/app.yml"
+     - 'if [[ ! -f ${VALUES_FILE} ]]; then echo "No such file: ${VALUES_FILE}" && export VALUES_FILE=""; fi'
+     - 'if [[ ! -z ${VALUES_FILE} ]]; then export VALUES_STRING="-f ${VALUES_FILE}"; fi'
+
+     - helm template
+      --namespace ${NAMESPACE}
+       ${VALUES_STRING}
+       --set "image.tag=$CI_COMMIT_SHORT_SHA"
+       ${APP_NAME} ./helm/${HELM_CHART}
+
+     - curl --silent "https://gitlab.com/gitlab-org/incubation-engineering/mobile-devops/download-secure-files/-/raw/main/installer" | bash
+     #- mkdir ~/.kube;cp /builds/mygroup/myproject/config ~/.kube
+     - mkdir ~/.kube;cp /builds/mygroup/myproject/minikube_flatten2 ~/.kube/config
+     - cd helm
+     - export KUBERNETES_MASTER=https://192.168.50.26:6443
+     - stern --namespace ${NAMESPACE} --since 1s ${APP_NAME} &
+     - export KUBECONFIG=~/.kube/config && werf helm upgrade  --install -f application/app.yml
+        --wait --wait-for-jobs
+        --namespace ${NAMESPACE} --create-namespace
+        --set "image.tag=$CI_COMMIT_SHORT_SHA"
+        ${APP_NAME} ./${HELM_CHART} || exit $? && kill %1
